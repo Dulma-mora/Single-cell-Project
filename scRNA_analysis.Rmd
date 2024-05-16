@@ -241,7 +241,6 @@ thalamus <- ScaleData(thalamus, features = all.genes)
 #thalamus <- ScaleData(thalamus, vars.to.regress = "percent.mt", features = all.genes)
 ```
 
-> What is this and what is the reason?
 
 To determine whether cell cycle or mtRNA are the main factors driving similarity among the cells, we first have to take a look at the cells themselves, as explained in the following.
 
@@ -274,9 +273,6 @@ In the Seurat tutorial the "Jackstraw" procedure is explained. Another more intu
 ElbowPlot(thalamus, ndims=40)
 ```
 
-> what is this shit?
-
-Este código realiza un cálculo para determinar el número de componentes principales (PC) a utilizar en un análisis basado en PCA.
 
 ```{r "no de PC = 14"}
 pc.touse <- (thalamus$pca@stdev)^2
@@ -405,7 +401,6 @@ thalamus14.4@meta.data %>%
 
 ### Finding "marker" genes and assigning cell types to clusters
 
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA I LOST ONE HOUR OF MY LIFE RUNNING THIS
 
 The above are the markers of cluster 2, with fold change, %of cells expressing it, pvalue and FDR. Sorted by increasing FDR. Could you guess which is the corresponding cell type?
 
@@ -572,7 +567,7 @@ In cluster 0 there are Hapln2, Pmp22 and Etv1 oligodendrocyte, oligo and endothe
 
 In cluster 10 there are RP23.47H16.3, Marcks, Rras2 oligodendrocyte precursor cell, endothelian cell
 
-They are the same shit, they are oligo in different mature states
+
 
 #### Cluster 12 and 13
 
