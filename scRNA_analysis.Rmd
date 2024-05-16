@@ -1,0 +1,711 @@
+---
+title: "Single Cell RNA Analysis"
+author: "Dulce Ma. Montero Rasgado"
+date: "2023-07-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+------------------------------------------------------------------------
+
+```{r libraries}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(SeuratData)
+library(ggplot2)
+```
+
+------------------------------------------------------------------------
+
+### Loading data
+
+```{r loading thalamus data}
+thalamus.data <- load("SRA667466_SRS3060059.sparse.RData")
+
+```
+
+### Mini challenge
+
+```{r adjusting rownames}
+
+ensembl <- gsub("\\_E.*","",rownames(sm))
+ensembl <- make.names(ensembl, unique=TRUE)
+rownames(sm) <- ensembl
+
+```
+
+------------------------------------------------------------------------
+
+### Continuing
+
+```{r}
+thalamus <- CreateSeuratObject(counts = sm,
+                                   project = "thalamus11k",
+                                   min.cells = 3,
+                                   min.features = 200) # the minimum
+
+# remember: names have - instead of _
+```
+
+------------------------------------------------------------------------
+
+#### Quick review of the data
+
+20 clusters were identified, the classification was mainly:
+
+-   Some groups of oligodendrocytes
+
+-   Macrophages
+
+-   Interneurons
+
+-   Endothelial cells
+
+-   Neurons
+
+-   Unknown
+
+### Exploring the object
+
+```{r}
+head(colnames(thalamus))
+```
+
+------------------------------------------------------------------------
+
+### Cell Quality Control
+
+-   Mitochondrial RNA Percentage
+-   Percentage of RNA encoding ribosomal proteins
+-   For each cell, the number of expressed genes (n_features)
+-   For each cell, the number of reads mapping to each cell (number of total reads per cell around 2000, number of reads mapping to protein coding genes are around 2000-3000).
+
+<!-- Select rows with name starting with mt. since my dataset is from mouse and it's not labelled with "-". -->
+
+<!-- ```{r exploring} -->
+
+<!-- grep("^mt.",rownames(thalamus),value = TRUE) -->
+
+<!-- ``` -->
+
+```{r Mitochondrial genes}
+thalamus[["percent.mt"]] <- PercentageFeatureSet(thalamus, pattern = "^mt.")
+```
+
+```{r Ribosomal Protein genes}
+thalamus[["percent.rbp"]] <- PercentageFeatureSet(thalamus, pattern = "^Rp[ls]")
+```
+
+Genes are also called features
+
+This is the number of unique genes (called here features) and total molecules (reads after UMI filtering).
+
+# `{r} # head(thalamus@meta.data, 5) #`
+
+------------------------------------------------------------------------
+
+#### Visualizing QC Metrics
+
+```{r}
+# Visualize QC metrics as violin plots - also adding the RPL genes
+VlnPlot(thalamus, features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.rbp"), ncol = 4,  pt.size=0)
+
+boxplot(thalamus@meta.data$percent.mt)$stats[c(1,5)]
+```
+
+We can check if the different parameters are correlated with one another.
+
+```{r}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(thalamus, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(thalamus, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+```{r}
+plot3 <- FeatureScatter(thalamus, feature1 = "nCount_RNA", feature2 = "percent.rbp")
+plot3
+```
+
+```{r before data filtering}
+thalamus
+```
+
+All in all the only visible correlation is between the number of reads and the number of genes detected. When they are too low, the droplet was empty. Too high, probably a doublet. On the basis of these plot, we have to decide thresholds for cell quality control.
+
+In the Seurat vignette, they employ:
+
+### Filtering
+
+```{r removing outliers}
+thalamus <- subset(thalamus, 
+            subset = nFeature_RNA > 200 # the minimum (is setted)
+            & nFeature_RNA < 3500 # guessed by my beauty eyes
+            & percent.mt < 13) # boxplot
+```
+
+```{r}
+thalamus
+```
+
+> It removed almost `900 samples!`
+
+```{r after filtering}
+
+# Visualize QC metrics as violin plots - also adding the RPL genes
+VlnPlot(thalamus, features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.rbp"), ncol = 4,  pt.size=0, cols = "#8B008B") 
+
+# Mostrar el gráfico
+
+boxplot(thalamus@meta.data$percent.mt)$stats[c(1,5)]
+```
+
+------------------------------------------------------------------------
+
+### Normalizing the data
+
+```{r}
+thalamus <- NormalizeData(thalamus, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+```{r}
+thalamus@assays
+```
+
+```{r}
+thalamus@assays$RNA
+```
+
+------------------------------------------------------------------------
+
+### Looking at the genes that have the highest mean expression across our cells
+
+```{r}
+apply(thalamus@assays$RNA@data,1,mean) -> gene.expression
+
+sort(gene.expression, decreasing = TRUE) -> gene.expression
+head(gene.expression, n=50) # top 50 genes with highest mean expression
+```
+
+So we can see that Fth1 have the highest mean expression, let's plot it with another housekeeping gene
+
+```{r}
+VlnPlot(thalamus, features = c("Fth1","Actb"), pt.size=0)
+```
+
+------------------------------------------------------------------------
+
+### Guessing in which cell cycle phase is every cell in
+
+```{r}
+CellCycleScoring(thalamus, s.features = cc.genes.updated.2019$s.genes, g2m.features = cc.genes.updated.2019$g2m.genes, set.ident = TRUE) -> thalamus
+
+thalamus[[]]  # wow!!
+```
+
+### Most variable genes
+
+```{r Top 10 most highly variable genes}
+#the default method -vst- computes (or better, estimates) the mean-variance relationship of each gene, and chooses the 2000 genes with hte highest variance. 
+thalamus <- FindVariableFeatures(thalamus, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(thalamus), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(thalamus)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+Pvalb, Pcp4, Ttr, Lyz2, Acta2, Pf4, Sst, Cd209f, Ccdc153 -\> variable count
+
+### Scaling counts
+
+```{r scaling}
+all.genes <- rownames(thalamus)
+thalamus <- ScaleData(thalamus, features = all.genes)
+
+```
+
+```{r may or not be used}
+#remove the cell cycle effect
+#thalamus <- ScaleData(thalamus, vars.to.regress = c("S.Score", "G2M.Score"), features = all.genes)
+#remove the bias due to the % of mt RNA
+#thalamus <- ScaleData(thalamus, vars.to.regress = "percent.mt", features = all.genes)
+```
+
+> What is this and what is the reason?
+
+To determine whether cell cycle or mtRNA are the main factors driving similarity among the cells, we first have to take a look at the cells themselves, as explained in the following.
+
+### Dimensional reduction \| Principal Component Analysis (PCA)
+
+```{r}
+thalamus <- RunPCA(thalamus, features = VariableFeatures(object = thalamus))
+
+# Examine and visualize PCA results in a few different ways
+print(thalamus[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+Plot
+
+```{r Projection of the cells in the first two principal components}
+VizDimLoadings(thalamus, dims = 1:2, reduction = "pca")
+```
+
+Genes que contribuyen más en las primeras dos dimensiones en el analisis de componentes principales. Identificación de genes importantes: Aqui algo cambio, checalo despues Sncb, Nsg2, Snap25\
+Cldn5, Flt1, Ly6c1
+
+```{r}
+DimPlot(thalamus, reduction = "pca")
+```
+
+In the Seurat tutorial the "Jackstraw" procedure is explained. Another more intuitive way is to represent the % of variance explained by each PC
+
+```{r}
+#with ndims we can choose how many PC to plot
+ElbowPlot(thalamus, ndims=40)
+```
+
+> what is this shit?
+
+Este código realiza un cálculo para determinar el número de componentes principales (PC) a utilizar en un análisis basado en PCA.
+
+```{r "no de PC = 14"}
+pc.touse <- (thalamus$pca@stdev)^2
+pc.touse <- pc.touse/sum(pc.touse)
+pc.touse <- cumsum(pc.touse)[1:50]
+pc.touse <- min(which(pc.touse>=0.75))
+pc.touse
+```
+
+## Clustering
+
+```{r "Finding Clusters"}
+ # dims 20 and resolution 0.5 | the best one til now
+ thalamus20 <- FindNeighbors(thalamus, dims = 1:20)
+ thalamus20 <- FindClusters(thalamus20, resolution = 0.5)
+
+# dim 14 and resolution 0.4
+thalamus14.4 <- FindNeighbors(thalamus, dims = 1:14)
+thalamus14.4 <- FindClusters(thalamus14.4, resolution = 0.4)
+```
+
+```{r}
+# Look at cluster IDs of the first 5 cells
+head(Idents(thalamus14.4), 5)
+```
+
+-   thalamus 17 clusters found
+-   thalamus20 19 clusters found
+
+```{r DIM (ugly plot)}
+head(thalamus[[]],5)
+
+# In all 17 clusters were found, numbered from 0 to 16.      
+# We can plot them in the space of the first two PCA components
+DimPlot(thalamus14.4, reduction = "pca")
+
+# Or we select the projection along any two of the 10 PC as we want:
+DimPlot(thalamus14.4,reduction="pca", dims=c(4,9))
+```
+
+But we know that for visualization and 2D plotting there are better strategies. t_SNE, always on the PC dimensions chosen for clustering:
+
+> TSNE
+
+```{r TSNE plot}
+# dims 20 and resolution 0.5 | Mejor hasta ahora
+# thalamus20 <- RunTSNE(thalamus20, dims=1:20)
+# DimPlot(thalamus20, reduction = "tsne")
+
+# dim 14 and resolution 0.4
+thalamus14.4 <- RunTSNE(thalamus14.4, dims=1:15)
+DimPlot(thalamus14.4, reduction = "tsne")
+
+```
+
+> Or UMAP, that as of today is the preferred method:
+
+```{r UMAP plot -  Fair :)}
+# dim 14 and resolution 0.4
+thalamus20 <- RunUMAP(thalamus20, dims = 1:20)
+DimPlot(thalamus20, reduction = "umap", label = TRUE)
+
+
+thalamus14.4 <- RunUMAP(thalamus14.4, dims = 1:14)
+DimPlot(thalamus14.4, reduction = "umap", label = TRUE)
+
+```
+
+0 and 4 3, 7 and 8
+
+### Seeing plots
+
+We can also check whether some of the critical quality parameters influenced the clustering we got: yu-pñp-gfñ
+
+#### thalamus14.4
+
+```{r thalamus bien}
+VlnPlot(thalamus14.4,features="nCount_RNA", pt.size = 0) # total RNA count
+VlnPlot(thalamus14.4,features="nFeature_RNA", pt.size = 0) # numero de genes o transcritos detectados
+VlnPlot(thalamus14.4,features="percent.mt", pt.size = 0) # genes provinientes de RNA mit
+VlnPlot(thalamus14.4,features="percent.rbp", pt.size = 0) # proteinas ribosomicas
+```
+
+library size: 17, 11 and 1 & 8\
+expressed genes: 7, 8, 17 for sure
+
+```{r thalamus14.4}
+VlnPlot(thalamus20,features="nCount_RNA", pt.size = 0) # total RNA count
+VlnPlot(thalamus20,features="nFeature_RNA", pt.size = 0) # numero de genes o transcritos detectados
+VlnPlot(thalamus20,features="percent.mt", pt.size = 0) # genes provinientes de RNA mit
+VlnPlot(thalamus20,features="percent.rbp", pt.size = 0) # proteinas ribosomicas
+```
+
+------------------------------------------------------------------------
+
+### From here
+
+Look for clusters in which we can notice relevant differences in library sizes and number of expressed genes.
+
+On the other hand (see later on) we will be anyway able to assign a cell identity to both.
+
+Or the cell cycle:
+
+```{r}
+library(ggplot2)
+library(wesanderson)
+# -----
+# thalaumus14.4
+thalamus14.4@meta.data %>%
+  group_by(seurat_clusters, Phase) %>%
+  count() %>%
+  group_by(seurat_clusters) %>%
+  mutate(percent = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(x = seurat_clusters, y = percent, fill = Phase)) +
+  geom_col(width = 0.86) +
+  ggtitle("Percentage of cell cycle phases per cluster") +
+  scale_fill_manual(values = wes_palette(n = 3, name = "GrandBudapest1")) +
+  theme(#text = element_text(family = "Barlow"),
+        panel.background = element_blank(),  # Delete grid
+        panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank()) 
+```
+
+------------------------------------------------------------------------
+
+### Finding "marker" genes and assigning cell types to clusters
+
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA I LOST ONE HOUR OF MY LIFE RUNNING THIS
+
+The above are the markers of cluster 2, with fold change, %of cells expressing it, pvalue and FDR. Sorted by increasing FDR. Could you guess which is the corresponding cell type?
+
+```{r 1 vs all analysis}
+#we return only genes "over expressed", found in at least 25% of the cells, and with a logFC threshold of at least 0.25
+
+thalamus14.4.markers <- FindAllMarkers(thalamus14.4,
+                                   only.pos = TRUE, 
+                                   min.pct = 0.25, 
+                                   logfc.threshold = 0.25)
+```
+
+### TOP GENES PER CLUSTER
+
+And we can output the top n (in this case 5) genes for each cluster. Notice that here they are sorted by logFC - more informative than "p_val_adj", since a lot of genes will have a FDR close to zero with smallest changes:
+
+```{r 5 TOP GENES FOR EACH CLUSTER}
+markers <- thalamus14.4.markers %>%
+           group_by(cluster) %>%
+           slice_max(n = 1, order_by = avg_log2FC)
+print(markers, n = 20)
+#markers <- thalamus14.4.markers %>%
+#   group_by(cluster) %>%
+#     slice_max(n = 2, order_by = avg_log2FC) # DO NOT SORT FOR FDR, ALSWAYS FOR logFC
+# print(markers, n=32)
+```
+
+> NEVER SORT BY FDR
+
+```{r}
+research <- markers$gene
+research
+```
+
+### QUICK CHECK OF CLUSTERS
+
+**Cluster 0** olygodendrocyte\
+Top: Trf (also known as Cd176) & Plp1 Trf = olygodendrocyte Plp1 = same !!
+
+**Cluster 1** asctrocyte of the cerebral cortex\
+Top: Slc6a11 & Gja1 Gja1 = astrocyte of the cerebral cortex SAME
+
+**Cluster 2** endothelial cell\
+Bsg (endothelial cell and oligodendrocyte) & Cldn5 (endothelial cell)
+
+**Cluster 3** neuron\
+"Snhg11" "Meg3" neuron botH!
+
+**Cluster 4** oligodendrocyte\
+"Opalin" oligodendrocyte! "Mal" oligodendrocyte and endothelian cells
+
+**Cluster 5** macrophage and microglial cell "Ctss" "hexb" macrophage and microglial cell and same!!
+
+**Cluster 6** oligodendrocyte precursor cell\
+"Pdgfra" "C1ql1"\
+oligodendrocyte precursor cell same!
+
+**Cluster 7** neuron\
+[15] "Nap1l5" "Gad2"\
+neuron\
+neuron
+
+**Cluster 8** neuron\
+[17] "Ndrg4" "Syt1"\
+neuron and oligodencrocyte precursor cell neron
+
+**Cluster 9** WEIRD\
+[19] "Vtn" "Higd1b"\
+brain pericyte same
+
+**Cluster 10** oligodendrocyte\
+[21] "RP23.47H16.3" "Nfasc"\
+unknown oligodendrocyte oligodendrocyte
+
+**Cluster 11** oligodendrocyte precursor cell\
+[23] "Gpr17" "Lims2"
+
+oligodendrocyte precursor cell oligo blabla precursor cell and endothelial cell
+
+**Cluster 12** oligodendrocyte\
+[25] "Mal" "Ptgds" Enpp2 endothelian cell oligodendrocyte oligodendrocyte
+
+**Cluster 13** macrophage and microglial cell\
+[27] "Cx3cr1" "Plp1"\
+macrophage and microglial cell also
+
+**Cluster 14** neuron\
+[29] "Snca" "Cplx2"\
+neuron neuron
+
+**Cluster 15** macrophage and microglial cell\
+[31] "Pf4" "Lyz2"\
+macrofago microglial cell
+
+**Cluster 16** microglial cell\
+[33] "Nupr1" "Dcn"\
+brain pericyte and microgial cell microglial cell
+
+**Cluster 17** UNKNOWN\
+[35] "Ttr" "RP23.100C7.3" microglial cell and astrocyte of the cerebral cortex unknown and unknown
+
+```{r}
+markers$cluster
+```
+
+### plotting real markers
+
+Going back to the "real" markers (sorted by logFC, not by FDR) we can plot their expression with a heatmap:
+
+```{r "real markers not that useful  first gene" }
+FeaturePlot(thalamus14.4, 
+            features = c("Ptgds", "Slc6a11", "Bsg", 
+                         "Snhg11", "Opalin", "Ctss", 
+                         "Pdgfra", "Nap1l5", "Ndrg4",
+                         "Vtn", "RP23.47H16.3", "", 
+                         "Gpr17", "Mal", "Cx3cr1", "Snca",
+                         "Pf4", "Nupr1", "Ttr"),
+            ncol = 3)
+```
+
+Or in single cells grouped by cluster:
+
+```{r HEATMAP GROUPED BY CLUSTER}
+thalamus14.4.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top10
+
+DoHeatmap(thalamus14.4, features = top10$gene) + NoLegend()
+```
+
+over expressed genes in the cluster
+
+0 and 4 3, 7 and 8
+
+```{r, c(10,10)}
+DoHeatmap(subset(thalamus14.4, downsample = 100), features = top10$gene, size = 3)
+```
+
+some quick similarities: - 4 vs 0 & 10 - 12 & 13 - 7 & 8 & 14
+
+```{r CLUSTER 4 vs 0 & 10}
+cluster4_010.markers <- FindMarkers(thalamus14.4, 
+                                    ident.1 = 4, 
+                                    ident.2 = c(0, 10), 
+                                    min.pct = 0.25)
+
+head(cluster4_010.markers, n = 10)
+```
+
+*TOP gene: Mal, Opalin and Fth1 oligodendrocyte, x2, x3 !!!! They should be cluster together!*
+
+```{r}
+cluster4vs010.markers <- FindMarkers(thalamus14.4, 
+                                     ident.1 = 10, 
+                                     ident.2 = c(4,0), min.pct = 0.25, test.use = "wilcox")
+
+cluster4vs010.markers <- cluster4vs010.markers[order(-cluster4vs010.markers$avg_log2FC),]
+head(cluster4vs010.markers, n = 10)
+```
+
+In cluster 4 there are Opalin plekhal and prickle1 oligodendorcyte,
+
+In cluster 0 there are Hapln2, Pmp22 and Etv1 oligodendrocyte, oligo and endothelian, endothelian
+
+In cluster 10 there are RP23.47H16.3, Marcks, Rras2 oligodendrocyte precursor cell, endothelian cell
+
+They are the same shit, they are oligo in different mature states
+
+#### Cluster 12 and 13
+
+```{r COMPARING CLUSTER 12 AND 13 genes sharing!!}
+cluster12AND13.markers <- FindMarkers(thalamus14.4, ident.1 = c(12,13), min.pct = 0.25, test.use = "wilcox")
+cluster12AND13.markers <- cluster12AND13.markers[order(-cluster12AND13.markers$avg_log2FC),]
+head(cluster12AND13.markers, n = 10)
+```
+
+**Shared genes between cluster 12 and 13** Mal = oligodendrocyte\
+Tmem88b = endothelial cell\
+Enpp2 = endothelial cell Plp1 = endothelial cell !!!
+
+Also cluster 12 and 13 are the same type cell appearently, so they should be clustered together ... or not?
+
+```{r GENES THAT CLUSTER 12 AND 13 DONT SHARE}
+cluster12vs13.markers <- FindMarkers(thalamus14.4, 
+                                     ident.1 = 12, 
+                                     ident.2 = 13, min.pct = 0.25, test.use = "wilcox")
+
+cluster12vs13.markers <- cluster12vs13.markers[order(-cluster12vs13.markers$avg_log2FC),]
+head(cluster12vs13.markers, n = 10)
+```
+
+In cluster 13, Bsg, Cldn5 and Rgs5 are expressed but not in cluster 12 brain pericyte and oligodendrocyte pericyte pericyte
+
+In cluster 12 there are Slc6a11, Aldoc and Slc1a2 but not in cluster 13 astrocyte, astrocyte, astrocyte NON RELATED
+
+pericytes and astrocytes interact closely with ENDOTHELIAL CELLS. Esto sugiere la presencia de subpoblaciones distintas dentro del grupo general de células endoteliales. Esta observación es interesante y puede indicar una heterogeneidad funcional o fenotípica dentro de las células endoteliales. Tiene coherencia biologica juntar ambos clusters
+
+#### Cluster 7 & 8 & 14
+
+```{r SHARING GENES}
+cluster7814.markers <- FindMarkers(thalamus14.4, 
+                                     ident.1 = c(7,8,14), min.pct = 0.25, test.use = "wilcox")
+
+cluster7814.markers <- cluster7814.markers[order(-cluster7814.markers$avg_log2FC),]
+head(cluster7814.markers, n = 10)
+```
+
+They share Sncb, Zwint, Nap1l5 neuron, oligodendrocyte, neuron x2, oligodendrocyte :D
+
+```{r NOT SHARING GENES}
+cluster7814.markers <- FindMarkers(thalamus14.4, 
+                                     ident.1 = 14, 
+                                     ident.2 = c(7, 8),
+                                     min.pct = 0.25, test.use = "wilcox")
+
+cluster7814.markers <- cluster7814.markers[order(-cluster7814.markers$avg_log2FC),]
+head(cluster7814.markers, n = 10)
+```
+
+In 7 \<- neuron, neuron, gad1 gad2, neuron In 8 \<- Cck, Ntng1, neuron, neuron In 14 \<- Cplx2 neuron, Rasl10a, neuron, Ddn, neuron
+
+SO I decide to merge all of them
+
+### PLOT ALL CLUSTERS
+
+[1] "Trf" "Slc6a11" "Bsg" "Snhg11" "Opalin" "Ctss" "Pdgfra"\
+[8] "Nap1l5" "Ndrg4" "Vtn" "RP23.47H16.3" "Gpr17" "Mal" "Cx3cr1"\
+[15] "Snca" "Pf4" "Nupr1" "Ttr"
+
+> CHANGING THINGS
+
+```{r}
+VlnPlot(thalamus14.4, 
+        features = c("Ptgds", "Slc6a11", "Bsg", 
+                         "Snhg11", "Opalin", "Ctss", 
+                         "Pdgfra", "Nap1l5", "Ndrg4",
+                         "Vtn", "RP23.47H16.3", "", 
+                         "Gpr17", "Mal", "Cx3cr1", "Snca",
+                         "Pf4", "Nupr1", "Ttr"))
+```
+
+or with a dot plot
+
+```{r}
+DotPlot(thalamus14.4, 
+         features = c("Ptgds", "Slc6a11", "Bsg", 
+                      "Snhg11", "Opalin", "Ctss", 
+                      "Pdgfra", "Nap1l5", "Ndrg4",
+                      "Vtn", "RP23.47H16.3", "", 
+                      "Gpr17", "Mal", "Cx3cr1", "Snca",
+                      "Pf4", "Nupr1", "Ttr"))
+```
+
+Finally, we can plot the cells with the corresponding cell type
+
+CLUSTER 0: oligodendrocyte CLUSTER 1: astrocyte of the cerebral cortex CLUSTER 2: endotelial cell CLUSTER 3: neuron CLUSTER 4: oligodendrocyte CLUSTER 5: macrophage and microglial cell CLUSTER 6: oligodendrocyte precursor cell CLUSTER 7: neuron CLUSTER 8: neuron CLUSTER 9: brain pericyte CLUSTER 10: oligodendrocyte CLUSTER 11: oligodendrocyte CLUSTER 12: oligodendrocyte CLUSTER 13: macrophage and microglial cell CLUSTER 14: neuron CLUSTER 15: macrophage and microglial cell CLUSTER 16: microgial cell CLUSTER 17: UNKNOWN
+
+```{r}
+new.cluster.ids <- c("oligodendrocyte", #0
+                     "astrocyte of the cerebral cortex", # 1
+                     "endotelial cell", 
+                     "neuron", 
+                     "oligodendrocyte", # 4
+                     "macrophage and microglial cell",
+                     "oligodendrocyte precursor cell", # 6 
+                     "neuron", 
+                     "neuron",# 8
+                     "brain pericyte",
+                     "oligodendrocyte",
+                     "oligodendrocyte",
+                     "oligodendrocyte", # 12
+                     "macrophage and microglial cell",
+                     "neuron",
+                     "macrophage and microglial cell",
+                     "microglial cell",
+                     "unknown") # 17
+
+names(new.cluster.ids) <- levels(thalamus14.4)
+
+thalamus14.4 <- RenameIdents(thalamus14.4, new.cluster.ids)
+
+#thalamus14.4 <- RenameIdents(thalamus14.4, new.cluster.ids)
+ DimPlot(thalamus14.4, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+```{r}
+# Single cell heatmap of feature expression
+thalamus14.4.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 1, wt = avg_log2FC) -> top10
+
+DoHeatmap(subset(thalamus14.4, downsample = 100), features = top10$gene, size = 3)
+```
+
+```{r}
+thalamus14.4.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 1, wt = avg_log2FC) -> top10
+
+
+DotPlot(thalamus14.4, 
+         features = top10$gene) + RotatedAxis() #+ wesanderson::wes_palette("GrandBudapest1")
+```
